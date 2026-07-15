@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# GPS Screen Control v3.1 - Core Service Script
+# GPS Screen Control v3.1 - Core Service Script (FIXED)
 # For APatch/KernelSU on OnePlus 8 with ColorOS 15/16
 # Optimized for multi-process persistence and battery efficiency
 
@@ -14,7 +14,7 @@ log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "${LOG_FILE}"
 }
 
-log_message "GPS Control Service Started - v3.1"
+log_message "GPS Control Service Started - v3.1 (FIXED)"
 
 # Function to get screen state (ColorOS 15/16 compatible)
 get_screen_state() {
@@ -36,20 +36,18 @@ get_foreground_app() {
     fi
 }
 
-# Function to enable GPS
+# Function to enable GPS (FIXED: Using modern Android official command)
 enable_gps() {
-    # Use settings to enable GPS
-    su -c "settings put secure location_providers_allowed +gps" 2>/dev/null
-    su -c "settings put secure location_mode 3" 2>/dev/null
-    log_message "GPS enabled"
+    # Modern Android 10+ standard command: cmd location set-location-enabled true
+    su -c "cmd location set-location-enabled true" 2>/dev/null
+    log_message "GPS enabled (via cmd location)"
 }
 
-# Function to disable GPS
+# Function to disable GPS (FIXED: Using modern Android official command)
 disable_gps() {
-    # Use settings to disable GPS
-    su -c "settings put secure location_providers_allowed -gps" 2>/dev/null
-    su -c "settings put secure location_mode 0" 2>/dev/null
-    log_message "GPS disabled"
+    # Modern Android 10+ standard command: cmd location set-location-enabled false
+    su -c "cmd location set-location-enabled false" 2>/dev/null
+    log_message "GPS disabled (via cmd location)"
 }
 
 # Function to check if app process is alive
