@@ -1,84 +1,51 @@
-// GPS Screen Control v3.1 - Core JavaScript Bridge (FIXED)
-// Optimized for KernelSU/APatch execution with proper timeout and error handling
+// GPS Screen Control v3.1 - Core JavaScript Bridge
+// Completely rewritten for better KernelSU/APatch compatibility
 
 const MODULE_DIR = '/data/adb/modules/gps_screen_control';
 const WHITELIST_FILE = `${MODULE_DIR}/whitelist.txt`;
-const COMMAND_TIMEOUT = 10000; // 10 second timeout for commands
 
 /**
- * Execute root command using KernelSU/APatch interface with timeout
- * @param {string} cmd - Command to execute
- * @param {number} timeout - Timeout in milliseconds
- * @returns {Promise<{stdout: string, stderr: string, code: number}>}
+ * Simple root command executor
  */
-async function executeCommand(cmd, timeout = COMMAND_TIMEOUT) {
+function executeShellCommand(cmd) {
     return new Promise((resolve) => {
-        let timeoutHandle = null;
-        let resolved = false;
-
-        const finalize = (result) => {
-            if (resolved) return;
-            resolved = true;
-            if (timeoutHandle) clearTimeout(timeoutHandle);
-            resolve(result);
-        };
-
-        // Set timeout
-        timeoutHandle = setTimeout(() => {
-            finalize({
-                stdout: '',
-                stderr: 'Command execution timeout',
-                code: 124
-            });
-        }, timeout);
-
         try {
-            if (window.ksu && window.ksu.exec) {
-                window.ksu.exec(cmd, (res) => {
-                    if (res && typeof res === 'object') {
-                        finalize({
-                            stdout: res.stdout || '',
-                            stderr: res.stderr || '',
-                            code: res.code || (res.stdout ? 0 : 1)
-                        });
-                    } else {
-                        finalize({
-                            stdout: res || '',
-                            stderr: '',
-                            code: 0
-                        });
-                    }
-                });
-            } else if (window.su && window.su.exec) {
-                window.su.exec(cmd, (res) => {
-                    finalize({
-                        stdout: res || '',
-                        stderr: '',
-                        code: 0
+            // Try KernelSU first
+            if (window.ksu && typeof window.ksu.exec === 'function') {
+                window.ksu.exec(cmd, (output) => {
+                    resolve({
+                        success: true,
+                        output: output || ''
                     });
                 });
-            } else {
-                // Fallback for testing
-                console.warn('No KSU/APatch interface available');
-                finalize({
-                    stdout: '',
-                    stderr: 'No root interface available',
-                    code: 127
+            }
+            // Fallback to su
+            else if (window.su && typeof window.su.exec === 'function') {
+                window.su.exec(cmd, (output) => {
+                    resolve({
+                        success: true,
+                        output: output || ''
+                    });
+                });
+            }
+            else {
+                resolve({
+                    success: false,
+                    output: 'No root interface'
                 });
             }
         } catch (e) {
-            console.error('Command execution error:', e);
-            finalize({
-                stdout: '',
-                stderr: e.toString(),
-                code: 1
+            console.error('Command error:', e);
+            resolve({
+                success: false,
+                output: e.toString()
             });
         }
     });
 }
 
 /**
- * Load all third-party applications with error recovery
+ * Load third-party apps
  */
 async function loadApplications() {
     const loadingEl = document.getElementById('loadingIndicator');
@@ -86,326 +53,216 @@ async function loadApplications() {
     
     loadingEl.style.display = 'flex';
     containerEl.style.display = 'none';
-    containerEl.innerHTML = '';
 
     try {
-        // Execute optimized command: only get third-party packages (-3 flag)
-        // With shorter timeout specifically for this operation
-        const result = await executeCommand('su -c "pm list packages -3"', 8000);
+        const result = await executeShellCommand('pm list packages -3');
         
-        if (result.code !== 0) {
-            showAlert('Failed to load packages: ' + result.stderr, 'error');
+        if (!result.success) {
+            showAlert('获取应用列表失败', 'error');
             loadingEl.style.display = 'none';
             return;
         }
 
-        // Parse packages with enhanced safety: skip empty lines, validate format
-        const apps = [];
-        const lines = result.stdout.split('\n');
-        
-        lines.forEach(line => {
-            try {
-                // Skip empty lines
-                if (!line || !line.trim()) {
-                    return;
-                }
-                
-                // Check if line starts with package prefix
-                if (line.startsWith('package:')) {
-                    const pkg = line.replace('package:', '').trim();
-                    // Additional validation: ensure package name is not empty and contains valid chars
-                    if (pkg && pkg.length > 0 && /^[a-zA-Z0-9._]+$/.test(pkg)) {
-                        apps.push(pkg);
-                    }
-                }
-            } catch (e) {
-                // Skip any malformed lines silently
-                console.debug('Skipped line:', line);
-            }
-        });
+        const apps = result.output
+            .split('\n')
+            .map(line => line.replace('package:', '').trim())
+            .filter(pkg => pkg && /^[a-zA-Z0-9._]+$/.test(pkg))
+            .sort();
 
-        // If no apps found, show warning
         if (apps.length === 0) {
-            showAlert('未找到应用。请检查系统权限或重新启动应用。', 'warning');
+            showAlert('未找到应用', 'warning');
             loadingEl.style.display = 'none';
             return;
         }
 
-        // Load current whitelist to check which apps are already selected
-        const whitelistResult = await executeCommand(`su -c "cat ${WHITELIST_FILE} 2>/dev/null"`, 5000);
-        const whitelistedApps = new Set();
+        // Load whitelist
+        const whitelistResult = await executeShellCommand(`cat ${WHITELIST_FILE}`);
+        const whitelisted = new Set();
         
-        if (whitelistResult.code === 0 && whitelistResult.stdout) {
-            whitelistResult.stdout.split('\n').forEach(line => {
-                if (line && line.trim()) {
-                    whitelistedApps.add(line.trim());
-                }
+        if (whitelistResult.success && whitelistResult.output) {
+            whitelistResult.output.split('\n').forEach(pkg => {
+                if (pkg.trim()) whitelisted.add(pkg.trim());
             });
         }
 
-        // Sort apps alphabetically
-        apps.sort();
-
-        // Render app list with checkboxes in batches to avoid DOM blocking
-        const batchSize = 100;
-        let htmlContent = '';
-        
-        for (let i = 0; i < apps.length; i++) {
-            const pkg = apps[i];
-            const safeId = `app_${escapeHtml(pkg)}`;
-            const isChecked = whitelistedApps.has(pkg) ? 'checked' : '';
-            
-            htmlContent += `
+        // Render apps
+        let html = '';
+        apps.forEach(pkg => {
+            const checked = whitelisted.has(pkg) ? 'checked' : '';
+            html += `
                 <div class="app-item">
-                    <input type="checkbox" id="${safeId}" value="${escapeHtml(pkg)}" ${isChecked}>
-                    <label for="${safeId}">
-                        <span class="app-name">${escapeHtml(pkg)}</span>
-                        <span class="app-package">${escapeHtml(pkg)}</span>
-                    </label>
+                    <input type="checkbox" value="${pkg}" ${checked}>
+                    <label>${pkg}</label>
                 </div>
             `;
-
-            // Render in batches
-            if ((i + 1) % batchSize === 0 || i === apps.length - 1) {
-                containerEl.innerHTML += htmlContent;
-                htmlContent = '';
-                // Allow UI to update
-                await new Promise(resolve => setTimeout(resolve, 0));
-            }
-        }
-
-        // Attach event listeners for dynamic filtering
-        const checkboxes = containerEl.querySelectorAll('input[type="checkbox"]');
-        checkboxes.forEach(cb => {
-            cb.addEventListener('change', () => {
-                // Optional: auto-save on change
-                // saveWhitelist();
-            });
         });
 
+        containerEl.innerHTML = html;
         loadingEl.style.display = 'none';
         containerEl.style.display = 'block';
-        showAlert(`✓ 已加载 ${apps.length} 个第三方应用`, 'success');
+        showAlert(`已加载 ${apps.length} 个应用`, 'success');
 
     } catch (e) {
-        console.error('Error loading applications:', e);
-        showAlert('加载应用列表失败: ' + e.toString(), 'error');
+        console.error('Load apps error:', e);
+        showAlert('加载失败: ' + e.message, 'error');
         loadingEl.style.display = 'none';
     }
 }
 
 /**
- * Save selected apps to whitelist file
+ * Save whitelist
  */
 async function saveWhitelist() {
-    try {
-        const checkboxes = document.querySelectorAll('#appListContainer input[type="checkbox"]:checked');
-        const selectedApps = Array.from(checkboxes).map(cb => cb.value);
+    const checkboxes = document.querySelectorAll('#appListContainer input:checked');
+    const apps = Array.from(checkboxes).map(cb => cb.value);
 
-        if (selectedApps.length === 0) {
-            showAlert('请至少选择一个应用', 'info');
-            return;
-        }
-
-        const content = selectedApps.join('\n');
-        
-        // Write to whitelist file using root command
-        // Use printf instead of echo for better compatibility
-        const escapedContent = content.replace(/'/g, "'\\''");
-        const cmd = `su -c "printf '%s' '${escapedContent}' > ${WHITELIST_FILE}"`;
-        
-        const result = await executeCommand(cmd, 5000);
-        
-        if (result.code === 0) {
-            showAlert(`✓ 已保存 ${selectedApps.length} 个应用到白名单`, 'success');
-            console.log('Saved apps:', selectedApps);
-        } else {
-            showAlert('保存白名单失败: ' + result.stderr, 'error');
-        }
-    } catch (e) {
-        console.error('Error saving whitelist:', e);
-        showAlert('保存失败: ' + e.toString(), 'error');
-    }
-}
-
-/**
- * Clear whitelist (delete file)
- */
-async function clearWhitelist() {
-    if (!confirm('确定要清空白名单吗？')) {
+    if (apps.length === 0) {
+        showAlert('请选择至少一个应用', 'info');
         return;
     }
 
     try {
-        const result = await executeCommand(`su -c "rm -f ${WHITELIST_FILE}"`, 5000);
-        
-        if (result.code === 0) {
-            // Uncheck all checkboxes
-            document.querySelectorAll('#appListContainer input[type="checkbox"]').forEach(cb => {
-                cb.checked = false;
-            });
-            showAlert('✓ 已清空白名单', 'success');
+        const content = apps.join('\n');
+        const cmd = `cat > ${WHITELIST_FILE} << 'EOF'\n${content}\nEOF`;
+        const result = await executeShellCommand(cmd);
+
+        if (result.success) {
+            showAlert(`已保存 ${apps.length} 个应用`, 'success');
         } else {
-            showAlert('清空失败: ' + result.stderr, 'error');
+            showAlert('保存失败', 'error');
         }
     } catch (e) {
-        console.error('Error clearing whitelist:', e);
-        showAlert('清空失败: ' + e.toString(), 'error');
+        showAlert('保存出错: ' + e.message, 'error');
     }
 }
 
 /**
- * Update system status display with proper error handling
+ * Clear whitelist
+ */
+async function clearWhitelist() {
+    if (!confirm('确定清空白名单?')) return;
+
+    try {
+        const result = await executeShellCommand(`rm -f ${WHITELIST_FILE}`);
+        
+        if (result.success) {
+            document.querySelectorAll('#appListContainer input').forEach(cb => {
+                cb.checked = false;
+            });
+            showAlert('已清空', 'success');
+        } else {
+            showAlert('清空失败', 'error');
+        }
+    } catch (e) {
+        showAlert('清空出错: ' + e.message, 'error');
+    }
+}
+
+/**
+ * Update status (completely rewritten)
  */
 async function updateStatus() {
     try {
-        // Execute all status commands in parallel with shorter timeout
-        const [gpsResult, screenResult, fgResult] = await Promise.all([
-            executeCommand('su -c "settings get secure location_mode"', 5000),
-            executeCommand('su -c "dumpsys display | grep -i mScreenState"', 5000),
-            executeCommand('su -c "dumpsys window windows | grep -i mCurrentFocus | head -1"', 5000)
-        ]);
-
-        // Update GPS status
-        if (gpsResult.code === 0 && gpsResult.stdout.trim()) {
-            const gpsStatus = parseInt(gpsResult.stdout.trim());
-            const gpsEnabled = gpsStatus > 0 ? '✓ 已开启' : '✗ 已关闭';
-            document.getElementById('gpsStatus').textContent = gpsEnabled;
-            document.getElementById('gpsStatus').style.color = gpsStatus > 0 ? '#4caf50' : '#ff6b6b';
+        // Get GPS status
+        const gpsCmd = 'settings get secure location_mode';
+        const gpsResult = await executeShellCommand(gpsCmd);
+        
+        const gpsStatus = document.getElementById('gpsStatus');
+        if (gpsResult.success && gpsResult.output) {
+            const mode = parseInt(gpsResult.output.trim());
+            if (mode > 0) {
+                gpsStatus.textContent = '✓ 已开启';
+                gpsStatus.style.color = '#4caf50';
+            } else {
+                gpsStatus.textContent = '✗ 已关闭';
+                gpsStatus.style.color = '#ff6b6b';
+            }
         } else {
-            document.getElementById('gpsStatus').textContent = '? 无法获取';
-            document.getElementById('gpsStatus').style.color = '#ffb74d';
+            gpsStatus.textContent = '✗ 已关闭';
+            gpsStatus.style.color = '#ff6b6b';
         }
 
-        // Update screen state
-        if (screenResult.code === 0) {
-            const screenOn = screenResult.stdout.includes('ON');
-            const screenStatus = screenOn ? '✓ 亮屏' : '✗ 熄屏';
-            document.getElementById('screenStatus').textContent = screenStatus;
-            document.getElementById('screenStatus').style.color = screenOn ? '#4caf50' : '#ff9800';
+        // Get screen state
+        const screenCmd = 'dumpsys display | grep "mScreenState"';
+        const screenResult = await executeShellCommand(screenCmd);
+        
+        const screenStatus = document.getElementById('screenStatus');
+        if (screenResult.success && screenResult.output) {
+            const isOn = screenResult.output.includes('ON');
+            screenStatus.textContent = isOn ? '✓ 亮屏' : '✗ 熄屏';
+            screenStatus.style.color = isOn ? '#4caf50' : '#ff9800';
         } else {
-            document.getElementById('screenStatus').textContent = '? 无法获取';
-            document.getElementById('screenStatus').style.color = '#ffb74d';
+            screenStatus.textContent = '✗ 熄屏';
+            screenStatus.style.color = '#ff9800';
         }
 
-        // Update foreground app
-        if (fgResult.code === 0 && fgResult.stdout) {
-            const match = fgResult.stdout.match(/([a-zA-Z0-9._]+)\//);
-            const fgApp = match ? match[1] : '无';
-            document.getElementById('fgApp').textContent = fgApp;
-            document.getElementById('fgApp').style.color = '#64c8ff';
+        // Get foreground app
+        const fgCmd = 'dumpsys window windows | grep "mCurrentFocus"';
+        const fgResult = await executeShellCommand(fgCmd);
+        
+        const fgStatus = document.getElementById('fgApp');
+        if (fgResult.success && fgResult.output) {
+            const match = fgResult.output.match(/([a-zA-Z0-9._]+)\//);
+            fgStatus.textContent = match ? match[1] : '无';
         } else {
-            document.getElementById('fgApp').textContent = '无';
-            document.getElementById('fgApp').style.color = '#64c8ff';
+            fgStatus.textContent = '无';
         }
+        fgStatus.style.color = '#64c8ff';
 
     } catch (e) {
-        console.error('Error updating status:', e);
-        // Set all to error state
-        document.getElementById('gpsStatus').textContent = '✗ 错误';
-        document.getElementById('screenStatus').textContent = '✗ 错误';
-        document.getElementById('fgApp').textContent = '✗ 错误';
+        console.error('Status update error:', e);
     }
 }
 
 /**
- * Show alert message
+ * Show alert
  */
-function showAlert(message, type = 'info') {
-    const alertDiv = document.createElement('div');
-    alertDiv.className = `alert alert-${type}`;
-    alertDiv.textContent = message;
-    alertDiv.style.animation = 'slideIn 0.3s ease';
+function showAlert(msg, type = 'info') {
+    const alert = document.createElement('div');
+    alert.className = `alert alert-${type}`;
+    alert.textContent = msg;
+    alert.style.animation = 'slideIn 0.3s ease';
     
     const container = document.querySelector('.control-card');
     if (container) {
-        container.insertBefore(alertDiv, container.firstChild);
-        
-        setTimeout(() => {
-            try {
-                alertDiv.remove();
-            } catch (e) {
-                // Already removed
-            }
-        }, 3000);
+        container.insertBefore(alert, container.firstChild);
+        setTimeout(() => alert.remove(), 3000);
     }
 }
 
 /**
- * Escape HTML special characters
+ * Search filter
  */
-function escapeHtml(text) {
-    const map = {
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#039;'
-    };
-    return text.replace(/[&<>"']/g, m => map[m]);
-}
-
-/**
- * Filter apps by search input
- */
-document.addEventListener('DOMContentLoaded', function() {
-    const searchInput = document.getElementById('searchInput');
-    if (searchInput) {
-        searchInput.addEventListener('input', function(e) {
+document.addEventListener('DOMContentLoaded', () => {
+    const search = document.getElementById('searchInput');
+    if (search) {
+        search.addEventListener('input', (e) => {
             const query = e.target.value.toLowerCase();
-            const appItems = document.querySelectorAll('.app-item');
-            
-            appItems.forEach(item => {
-                const label = item.textContent.toLowerCase();
-                item.style.display = label.includes(query) ? 'flex' : 'none';
+            document.querySelectorAll('.app-item').forEach(item => {
+                item.style.display = item.textContent.toLowerCase().includes(query) ? 'flex' : 'none';
             });
         });
     }
 });
 
 /**
- * Add slide-in animation
+ * Animation
  */
 const style = document.createElement('style');
 style.textContent = `
     @keyframes slideIn {
-        from {
-            opacity: 0;
-            transform: translateY(-10px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
     }
 `;
 document.head.appendChild(style);
 
 /**
- * Initialize on page load with error recovery
+ * Initialize
  */
 window.addEventListener('load', () => {
-    console.log('GPS Control Module v3.1 Initialized (FIXED)');
-    
-    // Load applications
-    loadApplications().catch(e => {
-        console.error('Initial load failed:', e);
-        showAlert('初始化应用列表失败，请点击「刷新列表」按钮重试', 'error');
-    });
-    
-    // Update status immediately and then every 5 seconds
-    updateStatus().catch(e => {
-        console.error('Initial status update failed:', e);
-    });
-    
-    const statusInterval = setInterval(() => {
-        updateStatus().catch(e => {
-            console.error('Status update failed:', e);
-        });
-    }, 5000);
-    
-    // Cleanup on page unload
-    window.addEventListener('beforeunload', () => {
-        clearInterval(statusInterval);
-    });
+    console.log('GPS Control v3.1 started');
+    loadApplications();
+    updateStatus();
+    setInterval(updateStatus, 5000);
 });
