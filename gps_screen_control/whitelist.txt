@@ -1,0 +1,5 @@
+# GPS Screen Control Whitelist
+# Add package names here (one per line)
+# Example:
+# com.google.android.maps
+# com.taobao.taobao
