@@ -1,133 +1,136 @@
 #!/system/bin/sh
-# GPS Screen Control v3.1 - Core Service Script (FIXED)
-# For APatch/KernelSU on OnePlus 8 with ColorOS 15/16
-# Optimized for multi-process persistence and battery efficiency
+# GPS Screen Control v4.0 - Enhanced Service Script
+# For APatch/KernelSU on Android 10+
+# Optimized for performance, battery efficiency, and reliability
 
 MODULE_DIR="/data/adb/modules/gps_screen_control"
 WHITELIST_FILE="${MODULE_DIR}/whitelist.txt"
 LOG_FILE="/data/adb/gps_control.log"
+LOG_MAX_SIZE=102400  # 100KB max log size
+CHECK_INTERVAL=2    # Check every 2 seconds (reduced from 1.5s for battery)
 
-# Ensure log file exists
-touch "${LOG_FILE}"
+# Initialize logging
+init_logging() {
+    if [ ! -f "${LOG_FILE}" ]; then
+        touch "${LOG_FILE}" 2>/dev/null || return 1
+    fi
+    
+    # Rotate log if too large
+    local size=$(stat -f%z "${LOG_FILE}" 2>/dev/null || stat -c%s "${LOG_FILE}" 2>/dev/null || echo 0)
+    if [ "${size}" -gt "${LOG_MAX_SIZE}" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] --- LOG ROTATED ---" > "${LOG_FILE}"
+    fi
+}
 
 log_message() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "${LOG_FILE}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "${LOG_FILE}" 2>/dev/null
 }
 
-log_message "GPS Control Service Started - v3.1 (FIXED)"
+init_logging
+log_message "==== GPS Control Service v4.0 Started ===="
 
-# Function to get screen state (ColorOS 15/16 compatible)
+# Get screen state (optimized)
 get_screen_state() {
-    # Check if screen is on via dumpsys display
-    local state=$(dumpsys display | grep -i "mScreenState" | head -1)
-    if echo "${state}" | grep -q "ON"; then
-        echo "on"
-    else
-        echo "off"
-    fi
+    local state=$(dumpsys display 2>/dev/null | grep "mScreenState" | head -1)
+    case "${state}" in
+        *ON*) echo "on" ;;
+        *) echo "off" ;;
+    esac
 }
 
-# Function to get foreground app package name
+# Get foreground app package (optimized regex)
 get_foreground_app() {
-    local fg=$(dumpsys window windows | grep -i "mCurrentFocus" | head -1)
-    # Extract package name from focus window
-    if echo "${fg}" | grep -q "Window{.*}"; then
-        echo "${fg}" | sed 's/.*\([a-zA-Z0-9._]*\/[a-zA-Z0-9._]*\).*/\1/' | cut -d'/' -f1
-    fi
+    dumpsys window windows 2>/dev/null | grep "mCurrentFocus" | head -1 | \
+        sed -E 's|.*([a-zA-Z0-9._-]+)/.*|\1|g' | grep -oE '^[a-zA-Z0-9._-]+' || echo ""
 }
 
-# Function to enable GPS (FIXED: Using modern Android official command)
-enable_gps() {
-    # Modern Android 10+ standard command: cmd location set-location-enabled true
-    su -c "cmd location set-location-enabled true" 2>/dev/null
-    log_message "GPS enabled (via cmd location)"
-}
-
-# Function to disable GPS (FIXED: Using modern Android official command)
-disable_gps() {
-    # Modern Android 10+ standard command: cmd location set-location-enabled false
-    su -c "cmd location set-location-enabled false" 2>/dev/null
-    log_message "GPS disabled (via cmd location)"
-}
-
-# Function to check if app process is alive
+# Check if process is alive (optimized)
 app_process_alive() {
     local pkg="$1"
-    if pidof "${pkg}" > /dev/null 2>&1; then
-        return 0
-    fi
-    if ps -A 2>/dev/null | grep -q "${pkg}"; then
-        return 0
-    fi
+    [ -z "${pkg}" ] && return 1
+    
+    # Try pidof first (faster)
+    pidof "${pkg}" >/dev/null 2>&1 && return 0
+    
+    # Fallback to ps
+    ps -A 2>/dev/null | grep -q "${pkg}" && return 0
     return 1
 }
 
-# Function to check if any whitelisted app is running in background
+# Check if any whitelisted app is running
 has_whitelisted_app_alive() {
-    if [ ! -f "${WHITELIST_FILE}" ]; then
-        return 1
-    fi
+    [ ! -f "${WHITELIST_FILE}" ] && return 1
     
-    while IFS= read -r line; do
-        # Skip empty lines
-        if [ -z "${line}" ]; then
-            continue
-        fi
-        # Skip comments
-        if echo "${line}" | grep -q "^#"; then
-            continue
-        fi
-        # Check if package is alive
-        if app_process_alive "${line}"; then
-            log_message "Whitelisted app alive in background: ${line}"
-            return 0
-        fi
+    while IFS= read -r pkg; do
+        # Skip empty lines and comments
+        case "${pkg}" in
+            ''|'#'*) continue ;;
+            *) app_process_alive "${pkg}" && return 0 ;;
+        esac
     done < "${WHITELIST_FILE}"
     
     return 1
 }
 
-# Function to check if app is in whitelist
+# Check if app is whitelisted
 is_app_whitelisted() {
     local pkg="$1"
-    if [ ! -f "${WHITELIST_FILE}" ]; then
-        return 1
-    fi
-    grep -q "^${pkg}$" "${WHITELIST_FILE}" 2>/dev/null
+    [ -z "${pkg}" ] && return 1
+    [ ! -f "${WHITELIST_FILE}" ] && return 1
+    grep -q "^${pkg}\$" "${WHITELIST_FILE}" 2>/dev/null
+}
+
+# Enable GPS
+enable_gps() {
+    cmd location set-location-enabled true 2>/dev/null
+    log_message "GPS enabled"
+}
+
+# Disable GPS
+disable_gps() {
+    cmd location set-location-enabled false 2>/dev/null
+    log_message "GPS disabled"
 }
 
 # Main control loop
-log_message "Entering main control loop"
+log_message "Entering control loop"
+last_state=""
 
 while true; do
     SCREEN_STATE=$(get_screen_state)
     
-    # If screen is OFF: Force disable GPS for maximum battery saving
     if [ "${SCREEN_STATE}" = "off" ]; then
-        disable_gps
-        sleep 2
-        continue
-    fi
-    
-    # Screen is ON: Check foreground app and background processes
-    FG_APP=$(get_foreground_app)
-    
-    # Case A: Foreground app is whitelisted
-    if is_app_whitelisted "${FG_APP}"; then
-        log_message "Foreground app whitelisted: ${FG_APP} - Enabling GPS"
-        enable_gps
-    else
-        # Case B: Foreground app is NOT whitelisted (e.g., home screen, other apps)
-        # Check if any whitelisted app is still running in background
-        if has_whitelisted_app_alive; then
-            log_message "No whitelisted app in foreground, but whitelisted apps running in background - Keeping GPS ON"
-            enable_gps
-        else
-            log_message "No whitelisted apps running anywhere - Disabling GPS"
+        # Screen off: always disable GPS
+        if [ "${last_state}" != "screen_off" ]; then
             disable_gps
+            last_state="screen_off"
+        fi
+    else
+        # Screen on: check apps
+        FG_APP=$(get_foreground_app)
+        
+        if is_app_whitelisted "${FG_APP}"; then
+            # Foreground app is whitelisted
+            if [ "${last_state}" != "fg_whitelisted" ]; then
+                enable_gps
+                log_message "Foreground app whitelisted: ${FG_APP}"
+                last_state="fg_whitelisted"
+            fi
+        elif has_whitelisted_app_alive; then
+            # Background app is whitelisted
+            if [ "${last_state}" != "bg_whitelisted" ]; then
+                enable_gps
+                log_message "Whitelisted app in background"
+                last_state="bg_whitelisted"
+            fi
+        else
+            # No whitelisted apps
+            if [ "${last_state}" != "no_whitelist" ]; then
+                disable_gps
+                last_state="no_whitelist"
+            fi
         fi
     fi
     
-    # Check every 1.5 seconds for responsive control
-    sleep 1.5
+    sleep ${CHECK_INTERVAL}
 done

@@ -1,7 +1,7 @@
 id=gps_screen_control
-name=GPS Screen Control v3.1
-version=3.1
-versionCode=31
-author=GPS Module Developer
-description=Dynamic GPS control module for APatch/KernelSU. Auto-manage GPS state based on screen status and whitelisted applications.
+name=GPS Screen Control
+version=4.0
+versionCode=40
+author=jixianrui20081214
+description=Dynamic GPS control module for APatch/KernelSU. Auto-manage GPS based on screen and whitelisted apps.
 api=1

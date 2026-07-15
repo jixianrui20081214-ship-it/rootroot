@@ -1,111 +1,140 @@
-// GPS Screen Control v3.1 - Core JavaScript Bridge
-// Completely rewritten for better KernelSU/APatch compatibility
+// GPS Screen Control v4.0 - JavaScript Interface
+// Completely rewritten for reliability and performance
 
-const MODULE_DIR = '/data/adb/modules/gps_screen_control';
-const WHITELIST_FILE = `${MODULE_DIR}/whitelist.txt`;
+const CONFIG = {
+    MODULE_DIR: '/data/adb/modules/gps_screen_control',
+    WHITELIST_FILE: '/data/adb/modules/gps_screen_control/whitelist.txt',
+    STATUS_UPDATE_INTERVAL: 5000,  // 5 seconds
+    COMMAND_TIMEOUT: 8000,          // 8 seconds
+    MAX_RETRIES: 2
+};
+
+let statusUpdateInterval = null;
 
 /**
- * Simple root command executor
+ * Execute shell command via KernelSU/APatch
  */
-function executeShellCommand(cmd) {
+async function executeCommand(cmd, timeout = CONFIG.COMMAND_TIMEOUT) {
     return new Promise((resolve) => {
+        let timeoutHandle = null;
+        let finished = false;
+
+        const done = (result) => {
+            if (finished) return;
+            finished = true;
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            resolve(result);
+        };
+
+        // Set timeout
+        timeoutHandle = setTimeout(() => {
+            done({ success: false, error: 'timeout', output: '' });
+        }, timeout);
+
         try {
-            // Try KernelSU first
-            if (window.ksu && typeof window.ksu.exec === 'function') {
-                window.ksu.exec(cmd, (output) => {
-                    resolve({
-                        success: true,
-                        output: output || ''
+            if (window.ksu?.exec) {
+                window.ksu.exec(cmd, (res) => {
+                    done({
+                        success: res?.success !== false && res?.code === 0,
+                        output: res?.stdout || res || '',
+                        error: res?.stderr || null
                     });
                 });
-            }
-            // Fallback to su
-            else if (window.su && typeof window.su.exec === 'function') {
-                window.su.exec(cmd, (output) => {
-                    resolve({
+            } else if (window.su?.exec) {
+                window.su.exec(cmd, (res) => {
+                    done({
                         success: true,
-                        output: output || ''
+                        output: res || '',
+                        error: null
                     });
                 });
-            }
-            else {
-                resolve({
-                    success: false,
-                    output: 'No root interface'
-                });
+            } else {
+                done({ success: false, error: 'no_interface', output: '' });
             }
         } catch (e) {
-            console.error('Command error:', e);
-            resolve({
-                success: false,
-                output: e.toString()
-            });
+            done({ success: false, error: e.message, output: '' });
         }
     });
 }
 
 /**
- * Load third-party apps
+ * Load installed applications
  */
 async function loadApplications() {
-    const loadingEl = document.getElementById('loadingIndicator');
-    const containerEl = document.getElementById('appListContainer');
-    
-    loadingEl.style.display = 'flex';
-    containerEl.style.display = 'none';
+    const loader = document.getElementById('loadingIndicator');
+    const container = document.getElementById('appListContainer');
+
+    loader.style.display = 'flex';
+    container.style.display = 'none';
+    container.innerHTML = '';
 
     try {
-        const result = await executeShellCommand('pm list packages -3');
+        const result = await executeCommand('pm list packages -3');
         
-        if (!result.success) {
+        if (!result.success || !result.output) {
             showAlert('获取应用列表失败', 'error');
-            loadingEl.style.display = 'none';
+            loader.style.display = 'none';
             return;
         }
 
+        // Parse packages
         const apps = result.output
             .split('\n')
             .map(line => line.replace('package:', '').trim())
-            .filter(pkg => pkg && /^[a-zA-Z0-9._]+$/.test(pkg))
+            .filter(pkg => pkg && /^[a-zA-Z0-9._-]+$/.test(pkg))
             .sort();
 
         if (apps.length === 0) {
-            showAlert('未找到应用', 'warning');
-            loadingEl.style.display = 'none';
+            showAlert('未找到第三方应用', 'warning');
+            loader.style.display = 'none';
             return;
         }
 
-        // Load whitelist
-        const whitelistResult = await executeShellCommand(`cat ${WHITELIST_FILE}`);
+        // Load current whitelist
+        const wlResult = await executeCommand(`cat ${CONFIG.WHITELIST_FILE}`);
         const whitelisted = new Set();
         
-        if (whitelistResult.success && whitelistResult.output) {
-            whitelistResult.output.split('\n').forEach(pkg => {
-                if (pkg.trim()) whitelisted.add(pkg.trim());
+        if (wlResult.success && wlResult.output) {
+            wlResult.output.split('\n').forEach(pkg => {
+                const trimmed = pkg.trim();
+                if (trimmed && !trimmed.startsWith('#')) {
+                    whitelisted.add(trimmed);
+                }
             });
         }
 
-        // Render apps
+        // Render apps in batches
         let html = '';
-        apps.forEach(pkg => {
+        const batchSize = 50;
+        
+        for (let i = 0; i < apps.length; i++) {
+            const pkg = apps[i];
+            const id = `app_${i}`;
             const checked = whitelisted.has(pkg) ? 'checked' : '';
+            
             html += `
                 <div class="app-item">
-                    <input type="checkbox" value="${pkg}" ${checked}>
-                    <label>${pkg}</label>
+                    <input type="checkbox" id="${id}" value="${escapeHtml(pkg)}" ${checked}>
+                    <label for="${id}">${escapeHtml(pkg)}</label>
                 </div>
             `;
-        });
 
-        containerEl.innerHTML = html;
-        loadingEl.style.display = 'none';
-        containerEl.style.display = 'block';
+            // Batch render
+            if ((i + 1) % batchSize === 0 || i === apps.length - 1) {
+                container.innerHTML += html;
+                html = '';
+                await new Promise(r => setTimeout(r, 0));
+            }
+        }
+
+        loader.style.display = 'none';
+        container.style.display = 'block';
         showAlert(`已加载 ${apps.length} 个应用`, 'success');
 
     } catch (e) {
-        console.error('Load apps error:', e);
+        console.error('Error loading apps:', e);
         showAlert('加载失败: ' + e.message, 'error');
-        loadingEl.style.display = 'none';
+        loader.style.display = 'none';
     }
 }
 
@@ -117,21 +146,22 @@ async function saveWhitelist() {
     const apps = Array.from(checkboxes).map(cb => cb.value);
 
     if (apps.length === 0) {
-        showAlert('请选择至少一个应用', 'info');
+        showAlert('请至少选择一个应用', 'info');
         return;
     }
 
     try {
         const content = apps.join('\n');
-        const cmd = `cat > ${WHITELIST_FILE} << 'EOF'\n${content}\nEOF`;
-        const result = await executeShellCommand(cmd);
+        const cmd = `cat > ${CONFIG.WHITELIST_FILE} << 'WHITELIST_EOF'\n${content}\nWHITELIST_EOF`;
+        const result = await executeCommand(cmd);
 
         if (result.success) {
-            showAlert(`已保存 ${apps.length} 个应用`, 'success');
+            showAlert(`已保存 ${apps.length} 个应用到白名单`, 'success');
         } else {
-            showAlert('保存失败', 'error');
+            showAlert('保存失败: ' + result.error, 'error');
         }
     } catch (e) {
+        console.error('Error saving:', e);
         showAlert('保存出错: ' + e.message, 'error');
     }
 }
@@ -140,74 +170,75 @@ async function saveWhitelist() {
  * Clear whitelist
  */
 async function clearWhitelist() {
-    if (!confirm('确定清空白名单?')) return;
+    if (!confirm('确定要清空白名单吗?')) return;
 
     try {
-        const result = await executeShellCommand(`rm -f ${WHITELIST_FILE}`);
+        const result = await executeCommand(`rm -f ${CONFIG.WHITELIST_FILE}`);
         
         if (result.success) {
             document.querySelectorAll('#appListContainer input').forEach(cb => {
                 cb.checked = false;
             });
-            showAlert('已清空', 'success');
+            showAlert('已清空白名单', 'success');
         } else {
-            showAlert('清空失败', 'error');
+            showAlert('清空失败: ' + result.error, 'error');
         }
     } catch (e) {
+        console.error('Error clearing:', e);
         showAlert('清空出错: ' + e.message, 'error');
     }
 }
 
 /**
- * Update status (completely rewritten)
+ * Reload apps list
+ */
+async function reloadApps() {
+    await loadApplications();
+}
+
+/**
+ * Update system status
  */
 async function updateStatus() {
     try {
         // Get GPS status
-        const gpsCmd = 'settings get secure location_mode';
-        const gpsResult = await executeShellCommand(gpsCmd);
+        const gpsResult = await executeCommand('settings get secure location_mode');
+        const gpsEl = document.getElementById('gpsStatus');
         
-        const gpsStatus = document.getElementById('gpsStatus');
         if (gpsResult.success && gpsResult.output) {
             const mode = parseInt(gpsResult.output.trim());
-            if (mode > 0) {
-                gpsStatus.textContent = '✓ 已开启';
-                gpsStatus.style.color = '#4caf50';
-            } else {
-                gpsStatus.textContent = '✗ 已关闭';
-                gpsStatus.style.color = '#ff6b6b';
-            }
+            gpsEl.textContent = mode > 0 ? '✓ 已开启' : '✗ 已关闭';
+            gpsEl.style.color = mode > 0 ? '#4caf50' : '#ff6b6b';
         } else {
-            gpsStatus.textContent = '✗ 已关闭';
-            gpsStatus.style.color = '#ff6b6b';
+            gpsEl.textContent = '✗ 已关闭';
+            gpsEl.style.color = '#ff6b6b';
         }
 
         // Get screen state
-        const screenCmd = 'dumpsys display | grep "mScreenState"';
-        const screenResult = await executeShellCommand(screenCmd);
+        const screenResult = await executeCommand('dumpsys display');
+        const screenEl = document.getElementById('screenStatus');
         
-        const screenStatus = document.getElementById('screenStatus');
         if (screenResult.success && screenResult.output) {
-            const isOn = screenResult.output.includes('ON');
-            screenStatus.textContent = isOn ? '✓ 亮屏' : '✗ 熄屏';
-            screenStatus.style.color = isOn ? '#4caf50' : '#ff9800';
+            const isOn = screenResult.output.includes('mScreenState=ON') || screenResult.output.includes('ON');
+            screenEl.textContent = isOn ? '✓ 亮屏' : '✗ 熄屏';
+            screenEl.style.color = isOn ? '#4caf50' : '#ff9800';
         } else {
-            screenStatus.textContent = '✗ 熄屏';
-            screenStatus.style.color = '#ff9800';
+            screenEl.textContent = '✗ 熄屏';
+            screenEl.style.color = '#ff9800';
         }
 
         // Get foreground app
-        const fgCmd = 'dumpsys window windows | grep "mCurrentFocus"';
-        const fgResult = await executeShellCommand(fgCmd);
+        const fgResult = await executeCommand('dumpsys window windows');
+        const fgEl = document.getElementById('fgApp');
         
-        const fgStatus = document.getElementById('fgApp');
         if (fgResult.success && fgResult.output) {
-            const match = fgResult.output.match(/([a-zA-Z0-9._]+)\//);
-            fgStatus.textContent = match ? match[1] : '无';
+            const match = fgResult.output.match(/([a-zA-Z0-9._-]+)\//m);
+            const pkg = match ? match[1] : '无';
+            fgEl.textContent = pkg;
         } else {
-            fgStatus.textContent = '无';
+            fgEl.textContent = '无';
         }
-        fgStatus.style.color = '#64c8ff';
+        fgEl.style.color = '#64c8ff';
 
     } catch (e) {
         console.error('Status update error:', e);
@@ -215,7 +246,7 @@ async function updateStatus() {
 }
 
 /**
- * Show alert
+ * Show alert message
  */
 function showAlert(msg, type = 'info') {
     const alert = document.createElement('div');
@@ -226,43 +257,57 @@ function showAlert(msg, type = 'info') {
     const container = document.querySelector('.control-card');
     if (container) {
         container.insertBefore(alert, container.firstChild);
-        setTimeout(() => alert.remove(), 3000);
+        setTimeout(() => {
+            try { alert.remove(); } catch (e) {}
+        }, 3000);
     }
 }
 
 /**
- * Search filter
+ * Escape HTML
+ */
+function escapeHtml(text) {
+    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return String(text).replace(/[&<>"']/g, m => map[m]);
+}
+
+/**
+ * Initialize on load
  */
 document.addEventListener('DOMContentLoaded', () => {
+    // Search filter
     const search = document.getElementById('searchInput');
     if (search) {
         search.addEventListener('input', (e) => {
             const query = e.target.value.toLowerCase();
             document.querySelectorAll('.app-item').forEach(item => {
-                item.style.display = item.textContent.toLowerCase().includes(query) ? 'flex' : 'none';
+                const text = item.textContent.toLowerCase();
+                item.style.display = text.includes(query) ? 'flex' : 'none';
             });
         });
     }
+
+    // Add animation keyframes
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    `;
+    document.head.appendChild(style);
 });
 
-/**
- * Animation
- */
-const style = document.createElement('style');
-style.textContent = `
-    @keyframes slideIn {
-        from { opacity: 0; transform: translateY(-10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-`;
-document.head.appendChild(style);
-
-/**
- * Initialize
- */
 window.addEventListener('load', () => {
-    console.log('GPS Control v3.1 started');
+    console.log('GPS Control v4.0 initialized');
     loadApplications();
     updateStatus();
-    setInterval(updateStatus, 5000);
+    
+    // Update status periodically
+    if (statusUpdateInterval) clearInterval(statusUpdateInterval);
+    statusUpdateInterval = setInterval(updateStatus, CONFIG.STATUS_UPDATE_INTERVAL);
+});
+
+window.addEventListener('beforeunload', () => {
+    if (statusUpdateInterval) clearInterval(statusUpdateInterval);
 });
